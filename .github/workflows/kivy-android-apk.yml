@@ -73,7 +73,10 @@ jobs:
 
           RELEASE_APK="bin/PyBlocks-Studio-${TAG}-debug.apk"
           cp "$SOURCE_APK" "$RELEASE_APK"
-          sha256sum "$RELEASE_APK" > "${RELEASE_APK}.sha256"
+          (
+            cd "$(dirname "$RELEASE_APK")"
+            sha256sum "$(basename "$RELEASE_APK")"
+          ) > "${RELEASE_APK}.sha256"
 
           {
             printf '## PyBlocks Studio %s\n\n' "$TAG"

@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: android-apk-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   validate:
@@ -75,19 +75,16 @@ jobs:
           cp "$SOURCE_APK" "$RELEASE_APK"
           sha256sum "$RELEASE_APK" > "${RELEASE_APK}.sha256"
 
-          cat > release-notes.md <<EOF
-          ## PyBlocks Studio ${TAG}
-
-          Initial Android package of the native Kivy visual Python programming environment.
-
-          - Package: `org.jerrecode.pyblocksstudio`
-          - Minimum Android version: API 24 / Android 7.0
-          - Architectures: ARM64 and ARMv7
-          - Build type: debug APK
-          - Source commit: `${GITHUB_SHA}`
-
-          This prerelease APK is suitable for direct testing and sideloading. Android may ask you to permit installation from the browser or file-manager app used to open it. It is not a production-signed Google Play package.
-          EOF
+          {
+            printf '## PyBlocks Studio %s\n\n' "$TAG"
+            printf '%s\n\n' 'Initial Android package of the native Kivy visual Python programming environment.'
+            printf '%s\n' '- Package: org.jerrecode.pyblocksstudio'
+            printf '%s\n' '- Minimum Android version: API 24 / Android 7.0'
+            printf '%s\n' '- Architectures: ARM64 and ARMv7'
+            printf '%s\n' '- Build type: debug APK'
+            printf '%s\n\n' "- Source commit: ${GITHUB_SHA}"
+            printf '%s\n' 'This prerelease APK is suitable for direct testing and sideloading. Android may ask you to permit installation from the browser or file-manager app used to open it. It is not a production-signed Google Play package.'
+          } > release-notes.md
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "apk=$RELEASE_APK" >> "$GITHUB_OUTPUT"
@@ -120,8 +117,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --title "PyBlocks Studio ${TAG}" \
               --notes-file release-notes.md \
-              --prerelease \
-              --latest=false
+              --prerelease
           else
             gh release create "$TAG" "$APK" "$CHECKSUM" \
               --repo "$GITHUB_REPOSITORY" \

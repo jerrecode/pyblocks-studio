@@ -1,14 +1,14 @@
 {
   "apk_url": "https://github.com/jerrecode/pyblocks-studio/releases/download/v0.1.0/PyBlocks-Studio-v0.1.0-debug.apk",
-  "build": "cancelled",
-  "recorded_at_utc": "2026-07-28T05:38:18.956310+00:00",
+  "build": "failure",
+  "recorded_at_utc": "2026-07-28T05:59:01.332287+00:00",
   "release_url": "https://github.com/jerrecode/pyblocks-studio/releases/tag/v0.1.0",
   "result": "failure",
-  "source_commit": "fc77d39b7e69a1045f10e42953eccc37f4607009",
+  "source_commit": "04cf73cd412dde2950e46d4fd36129b69c9679eb",
   "tag": "v0.1.0",
   "validation": "success",
   "version": "0.1.0",
   "workflow_attempt": 1,
-  "workflow_run_id": 30331993008,
-  "workflow_url": "https://github.com/jerrecode/pyblocks-studio/actions/runs/30331993008"
+  "workflow_run_id": 30332215991,
+  "workflow_url": "https://github.com/jerrecode/pyblocks-studio/actions/runs/30332215991"
 }

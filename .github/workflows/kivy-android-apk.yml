@@ -1,0 +1,64 @@
+name: Build Kivy Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "kivy_android/**"
+      - ".github/workflows/kivy-android-apk.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: kivy_android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run packaging preflight
+        run: python scripts/preflight.py
+      - name: Run semantic tests
+        run: python -m unittest discover -s tests -v
+
+  build-apk:
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: kivy_android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake build-essential ccache cmake git \
+            libffi-dev libltdl-dev libncurses5-dev libncursesw5-dev \
+            libssl-dev libtool openjdk-17-jdk patch pkg-config \
+            python3-dev unzip zip zlib1g-dev
+      - name: Install Buildozer
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install "buildozer>=1.5,<2" "cython<3"
+      - name: Build debug APK
+        env:
+          BUILDOZER_WARN_ON_ROOT: "0"
+        run: buildozer -v android debug
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyblocks-studio-debug-apk
+          path: kivy_android/bin/*.apk
+          if-no-files-found: error
+          retention-days: 14

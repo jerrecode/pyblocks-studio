@@ -66,69 +66,109 @@ jobs:
           mkdir -p "$HOME/.android"
           base64 --decode android-preview-debug.keystore.b64 > "$HOME/.android/debug.keystore"
           chmod 600 "$HOME/.android/debug.keystore"
-          keytool -list \
+          keytool -list -v \
             -keystore "$HOME/.android/debug.keystore" \
             -storepass android \
-            -alias androiddebugkey >/dev/null
-      - name: Build debug APK
+            -alias androiddebugkey | tee preview-key-report.txt
+          KEY_FINGERPRINT="$(sed -n 's/^[[:space:]]*SHA256:[[:space:]]*//p' preview-key-report.txt | head -n 1 | tr -d ':[:space:]' | tr 'A-F' 'a-f')"
+          test "$KEY_FINGERPRINT" = "$PREVIEW_CERT_SHA256"
+      - name: Build intermediate debug APK
         env:
           BUILDOZER_WARN_ON_ROOT: "0"
         run: buildozer -v android debug
-      - name: Verify installability, manifest, ABI, and signature
+      - name: Realign, explicitly sign, and verify final APK
         id: verify_apk
         shell: bash
         run: |
           set -euo pipefail
 
-          SOURCE_APK="$(find bin -maxdepth 1 -type f -name '*.apk' -print -quit)"
-          test -n "$SOURCE_APK"
-          unzip -t "$SOURCE_APK" >/dev/null
+          VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*//p' buildozer.spec | head -n 1 | tr -d '[:space:]')"
+          TAG="v${VERSION}"
+          BUILD_APK="$(find bin -maxdepth 1 -type f -name '*.apk' ! -name '*-arm64-preview.apk' -print -quit)"
+          test -f "$BUILD_APK"
+          unzip -t "$BUILD_APK" >/dev/null
 
-          SDK_ROOT="$(find "$HOME/.buildozer" .buildozer -type d -path '*/android-sdk' -print -quit)"
-          test -n "$SDK_ROOT"
-          APKSIGNER="$(find "$SDK_ROOT/build-tools" -type f -name apksigner -print | sort -V | tail -n 1)"
-          AAPT="$(find "$SDK_ROOT/build-tools" -type f -name aapt -print | sort -V | tail -n 1)"
-          ZIPALIGN="$(find "$SDK_ROOT/build-tools" -type f -name zipalign -print | sort -V | tail -n 1)"
+          SEARCH_ROOTS=("$HOME/.buildozer" "$PWD/.buildozer")
+          APKSIGNER="$(find "${SEARCH_ROOTS[@]}" -type f -name apksigner -print 2>/dev/null | sort -V | tail -n 1)"
+          AAPT="$(find "${SEARCH_ROOTS[@]}" -type f -name aapt -print 2>/dev/null | sort -V | tail -n 1)"
+          ZIPALIGN="$(find "${SEARCH_ROOTS[@]}" -type f -name zipalign -print 2>/dev/null | sort -V | tail -n 1)"
+          printf 'apksigner=%s\naapt=%s\nzipalign=%s\n' "$APKSIGNER" "$AAPT" "$ZIPALIGN" | tee android-tools-report.txt
           test -x "$APKSIGNER"
           test -x "$AAPT"
           test -x "$ZIPALIGN"
 
-          "$APKSIGNER" verify --verbose --print-certs "$SOURCE_APK" | tee apksigner-report.txt
-          CERT_SHA256="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' apksigner-report.txt | head -n 1 | tr -d ':[:space:]' | tr 'A-F' 'a-f')"
-          test "$CERT_SHA256" = "$PREVIEW_CERT_SHA256"
+          ALIGNED_APK="bin/PyBlocks-Studio-${TAG}-aligned-unsigned.apk"
+          FINAL_APK="bin/PyBlocks-Studio-${TAG}-arm64-preview.apk"
+          rm -f "$ALIGNED_APK" "$FINAL_APK"
 
-          "$AAPT" dump badging "$SOURCE_APK" | tee aapt-badging.txt
+          "$ZIPALIGN" -f -P 16 -v 4 "$BUILD_APK" "$ALIGNED_APK" | tee zipalign-build-report.txt
+          "$APKSIGNER" sign \
+            --ks "$HOME/.android/debug.keystore" \
+            --ks-key-alias androiddebugkey \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --min-sdk-version 24 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out "$FINAL_APK" \
+            "$ALIGNED_APK"
+          rm -f "$ALIGNED_APK"
+
+          unzip -t "$FINAL_APK" >/dev/null
+          "$APKSIGNER" verify --verbose --print-certs "$FINAL_APK" | tee apksigner-report.txt
+          grep -Fqi "$PREVIEW_CERT_SHA256" apksigner-report.txt
+
+          "$AAPT" dump badging "$FINAL_APK" | tee aapt-badging.txt
           grep -Fq "package: name='${PREVIEW_PACKAGE_ID}'" aapt-badging.txt
-          grep -Fq "native-code: 'arm64-v8a'" aapt-badging.txt
-          if grep -Fq "native-code: 'armeabi-v7a'" aapt-badging.txt; then
-            echo "Unexpected ARMv7 payload in ARM64 install-repair APK" >&2
+
+          unzip -Z1 "$FINAL_APK" | tee apk-file-list.txt >/dev/null
+          grep -Eq '^lib/arm64-v8a/[^/]+[.]so$' apk-file-list.txt
+          if grep -Eq '^lib/(armeabi-v7a|x86|x86_64)/' apk-file-list.txt; then
+            echo "Unexpected non-ARM64 native library payload" >&2
             exit 1
           fi
 
-          "$AAPT" dump permissions "$SOURCE_APK" | tee aapt-permissions.txt
-          if grep -Fq "name='android.permission.'" aapt-permissions.txt; then
+          "$AAPT" dump permissions "$FINAL_APK" | tee aapt-permissions.txt
+          if grep -Fq "android.permission.'" aapt-permissions.txt || grep -Fxq 'uses-permission: name=android.permission.' aapt-permissions.txt; then
             echo "Malformed blank Android permission is still present" >&2
             exit 1
           fi
 
-          "$ZIPALIGN" -c -P 16 -v 4 "$SOURCE_APK" >/dev/null
+          "$ZIPALIGN" -c -P 16 -v 4 "$FINAL_APK" | tee zipalign-check-report.txt
+          sha256sum "$FINAL_APK" | tee final-apk-sha256.txt
 
-          echo "source_apk=$SOURCE_APK" >> "$GITHUB_OUTPUT"
-          echo "certificate_sha256=$CERT_SHA256" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "final_apk=$FINAL_APK" >> "$GITHUB_OUTPUT"
+      - name: Upload verification diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyblocks-studio-v0.1.1-verification
+          path: |
+            kivy_android/preview-key-report.txt
+            kivy_android/android-tools-report.txt
+            kivy_android/zipalign-build-report.txt
+            kivy_android/apksigner-report.txt
+            kivy_android/aapt-badging.txt
+            kivy_android/aapt-permissions.txt
+            kivy_android/apk-file-list.txt
+            kivy_android/zipalign-check-report.txt
+            kivy_android/final-apk-sha256.txt
+            kivy_android/bin/PyBlocks-Studio-v*-arm64-preview.apk
+          if-no-files-found: warn
+          retention-days: 14
       - name: Prepare versioned release assets
         id: release_assets
         shell: bash
         run: |
           set -euo pipefail
 
-          VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*//p' buildozer.spec | head -n 1 | tr -d '[:space:]')"
-          test -n "$VERSION"
-          TAG="v${VERSION}"
-          SOURCE_APK="${{ steps.verify_apk.outputs.source_apk }}"
-          test -f "$SOURCE_APK"
-
-          RELEASE_APK="bin/PyBlocks-Studio-${TAG}-arm64-preview.apk"
-          cp "$SOURCE_APK" "$RELEASE_APK"
+          TAG="${{ steps.verify_apk.outputs.tag }}"
+          RELEASE_APK="${{ steps.verify_apk.outputs.final_apk }}"
+          test -n "$TAG"
+          test -f "$RELEASE_APK"
           (
             cd "$(dirname "$RELEASE_APK")"
             sha256sum "$(basename "$RELEASE_APK")"
@@ -140,10 +180,10 @@ jobs:
             printf '%s\n' '- Package: org.jerrecode.pyblocksstudiopreview'
             printf '%s\n' '- Minimum Android version: API 24 / Android 7.0'
             printf '%s\n' '- Architecture: ARM64'
-            printf '%s\n' '- Build type: debug-signed preview APK'
+            printf '%s\n' '- Build type: explicitly aligned and debug-signed preview APK'
             printf '%s\n' '- Stable preview certificate SHA-256: f380b4fd74574daa3a4f45abb5872fb6d48be95bf7aacdcfa867a41e0478f89b'
             printf '%s\n\n' "- Source commit: ${GITHUB_SHA}"
-            printf '%s\n' 'This build removes the malformed blank permission from v0.1.0 and uses a conflict-free package ID so it can be installed independently of any earlier PyBlocks Studio package.'
+            printf '%s\n' 'This build removes the malformed blank permission from v0.1.0, uses a conflict-free package ID, is explicitly realigned for 16 KB page-size devices, and is re-signed with the stable preview certificate.'
             printf '%s\n' 'This is a public test-key prerelease for direct sideloading, not a production-signed Google Play package.'
           } > release-notes.md
 
@@ -178,7 +218,7 @@ jobs:
               --notes-file release-notes.md \
               --prerelease
           fi
-      - name: Upload short-lived workflow artifact
+      - name: Upload short-lived APK artifact
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:

@@ -1,0 +1,61 @@
+name: Repair v0.1.0 Release Checksum
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/repair-v0.1.0-release-checksum.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair-checksum:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replace checksum with portable filename
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v0.1.0
+          APK_NAME: PyBlocks-Studio-v0.1.0-debug.apk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p release-assets
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$APK_NAME" \
+            --dir release-assets
+
+          (
+            cd release-assets
+            sha256sum "$APK_NAME" > "${APK_NAME}.sha256"
+            sha256sum -c "${APK_NAME}.sha256"
+          )
+
+          gh release upload "$TAG" \
+            "release-assets/${APK_NAME}.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+          HASH="$(sha256sum "release-assets/$APK_NAME" | awk '{print $1}')"
+          mkdir -p release-status
+          cat > "release-status/${TAG}-checksum.json" <<EOF
+          {
+            "apk": "${APK_NAME}",
+            "sha256": "${HASH}",
+            "checksum_filename_is_portable": true,
+            "release_tag": "${TAG}",
+            "workflow_run_id": ${GITHUB_RUN_ID}
+          }
+          EOF
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
+          git add "release-status/${TAG}-checksum.json"
+          git commit -m "Record repaired ${TAG} release checksum [skip ci]"
+          git push origin HEAD:main

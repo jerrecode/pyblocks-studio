@@ -89,15 +89,6 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "apk=$RELEASE_APK" >> "$GITHUB_OUTPUT"
           echo "checksum=${RELEASE_APK}.sha256" >> "$GITHUB_OUTPUT"
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: pyblocks-studio-debug-apk
-          path: |
-            ${{ steps.release_assets.outputs.apk }}
-            ${{ steps.release_assets.outputs.checksum }}
-          if-no-files-found: error
-          retention-days: 14
       - name: Create or update GitHub prerelease
         if: github.event_name == 'push'
         env:
@@ -126,6 +117,16 @@ jobs:
               --notes-file release-notes.md \
               --prerelease
           fi
+      - name: Upload short-lived workflow artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyblocks-studio-debug-apk
+          path: |
+            kivy_android/bin/PyBlocks-Studio-v*-debug.apk
+            kivy_android/bin/PyBlocks-Studio-v*-debug.apk.sha256
+          if-no-files-found: error
+          retention-days: 14
 
   record-result:
     if: always()

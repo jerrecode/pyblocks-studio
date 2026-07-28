@@ -1,4 +1,4 @@
-name: Build Kivy Android APK
+name: Build and Release Kivy Android APK
 
 on:
   workflow_dispatch:
@@ -9,7 +9,11 @@ on:
       - ".github/workflows/kivy-android-apk.yml"
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   validate:
@@ -55,10 +59,74 @@ jobs:
         env:
           BUILDOZER_WARN_ON_ROOT: "0"
         run: buildozer -v android debug
-      - name: Upload APK
+      - name: Prepare versioned release assets
+        id: release_assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*//p' buildozer.spec | head -n 1 | tr -d '[:space:]')"
+          test -n "$VERSION"
+          TAG="v${VERSION}"
+          SOURCE_APK="$(find bin -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -n "$SOURCE_APK"
+
+          RELEASE_APK="bin/PyBlocks-Studio-${TAG}-debug.apk"
+          cp "$SOURCE_APK" "$RELEASE_APK"
+          sha256sum "$RELEASE_APK" > "${RELEASE_APK}.sha256"
+
+          cat > release-notes.md <<EOF
+          ## PyBlocks Studio ${TAG}
+
+          Initial Android package of the native Kivy visual Python programming environment.
+
+          - Package: `org.jerrecode.pyblocksstudio`
+          - Minimum Android version: API 24 / Android 7.0
+          - Architectures: ARM64 and ARMv7
+          - Build type: debug APK
+          - Source commit: `${GITHUB_SHA}`
+
+          This prerelease APK is suitable for direct testing and sideloading. Android may ask you to permit installation from the browser or file-manager app used to open it. It is not a production-signed Google Play package.
+          EOF
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "apk=$RELEASE_APK" >> "$GITHUB_OUTPUT"
+          echo "checksum=${RELEASE_APK}.sha256" >> "$GITHUB_OUTPUT"
+      - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: pyblocks-studio-debug-apk
-          path: kivy_android/bin/*.apk
+          path: |
+            ${{ steps.release_assets.outputs.apk }}
+            ${{ steps.release_assets.outputs.checksum }}
           if-no-files-found: error
           retention-days: 14
+      - name: Create or update GitHub prerelease
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release_assets.outputs.tag }}
+          APK: ${{ steps.release_assets.outputs.apk }}
+          CHECKSUM: ${{ steps.release_assets.outputs.checksum }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" "$CHECKSUM" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+            gh release edit "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "PyBlocks Studio ${TAG}" \
+              --notes-file release-notes.md \
+              --prerelease \
+              --latest=false
+          else
+            gh release create "$TAG" "$APK" "$CHECKSUM" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "PyBlocks Studio ${TAG}" \
+              --notes-file release-notes.md \
+              --prerelease
+          fi

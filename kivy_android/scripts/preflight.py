@@ -18,6 +18,7 @@ REQUIRED = (
     "main.py",
     "buildozer.spec",
     "requirements.txt",
+    "android-preview-debug.keystore.b64",
     "pyblocks/__init__.py",
     "pyblocks/model.py",
     "pyblocks/catalog.py",
@@ -26,6 +27,8 @@ REQUIRED = (
     "pyblocks/runtime.py",
     "pyblocks/app.py",
 )
+
+EXPECTED_PACKAGE = "org.jerrecode.pyblocksstudiopreview"
 
 
 def validate_files() -> None:
@@ -51,17 +54,47 @@ def validate_buildozer() -> None:
     parser = configparser.ConfigParser(interpolation=None)
     parser.read(ROOT / "buildozer.spec", encoding="utf-8")
     app = parser["app"]
+
     if app.get("source.dir") != ".":
         raise RuntimeError("buildozer.spec must package this directory")
+
     requirements = {item.strip() for item in app.get("requirements", "").split(",")}
     if "python3" not in requirements:
         raise RuntimeError("python3 is missing from Buildozer requirements")
     if not any(item == "kivy" or item.startswith("kivy==") for item in requirements):
         raise RuntimeError("Kivy is missing from Buildozer requirements")
+
     if int(app.get("android.minapi", "0")) < 21:
         raise RuntimeError("android.minapi is unexpectedly old")
-    if not app.get("android.archs", "").strip():
-        raise RuntimeError("No Android architectures configured")
+
+    archs = [item.strip() for item in app.get("android.archs", "").split(",") if item.strip()]
+    if archs != ["arm64-v8a"]:
+        raise RuntimeError("The install-repair build must be an ARM64-only APK")
+
+    package_id = f"{app.get('package.domain', '').strip()}.{app.get('package.name', '').strip()}"
+    if package_id != EXPECTED_PACKAGE:
+        raise RuntimeError(f"Unexpected Android package ID: {package_id}")
+
+    if app.get("version", "").strip() != "0.1.1":
+        raise RuntimeError("The install-repair release must be version 0.1.1")
+
+    # An empty Buildozer permissions key is not equivalent to no permissions.
+    # It generated a literal android.permission. request in v0.1.0.
+    if "android.permissions" in app:
+        value = app.get("android.permissions", "")
+        if not value.strip():
+            raise RuntimeError(
+                "Remove the empty android.permissions key; it generates android.permission."
+            )
+
+
+def validate_signing_key() -> None:
+    encoded = (ROOT / "android-preview-debug.keystore.b64").read_text(encoding="ascii")
+    compact = "".join(encoded.split())
+    if len(compact) < 3000:
+        raise RuntimeError("Stable preview keystore payload is unexpectedly short")
+    if not compact.startswith("MII"):
+        raise RuntimeError("Stable preview keystore is not a PKCS#12 base64 payload")
 
 
 def validate_semantics() -> None:
@@ -91,6 +124,7 @@ def main() -> int:
     validate_files()
     validate_python()
     validate_buildozer()
+    validate_signing_key()
     validate_semantics()
     print("PyBlocks Studio Android preflight passed.")
     return 0

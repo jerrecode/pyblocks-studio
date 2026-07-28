@@ -15,6 +15,10 @@ concurrency:
   group: android-apk-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  PREVIEW_PACKAGE_ID: org.jerrecode.pyblocksstudiopreview
+  PREVIEW_CERT_SHA256: f380b4fd74574daa3a4f45abb5872fb6d48be95bf7aacdcfa867a41e0478f89b
+
 jobs:
   validate:
     runs-on: ubuntu-24.04
@@ -55,10 +59,62 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install "buildozer>=1.5,<2" "cython<3"
+      - name: Install stable preview signing key
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.android"
+          base64 --decode android-preview-debug.keystore.b64 > "$HOME/.android/debug.keystore"
+          chmod 600 "$HOME/.android/debug.keystore"
+          keytool -list \
+            -keystore "$HOME/.android/debug.keystore" \
+            -storepass android \
+            -alias androiddebugkey >/dev/null
       - name: Build debug APK
         env:
           BUILDOZER_WARN_ON_ROOT: "0"
         run: buildozer -v android debug
+      - name: Verify installability, manifest, ABI, and signature
+        id: verify_apk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE_APK="$(find bin -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -n "$SOURCE_APK"
+          unzip -t "$SOURCE_APK" >/dev/null
+
+          SDK_ROOT="$(find "$HOME/.buildozer" .buildozer -type d -path '*/android-sdk' -print -quit)"
+          test -n "$SDK_ROOT"
+          APKSIGNER="$(find "$SDK_ROOT/build-tools" -type f -name apksigner -print | sort -V | tail -n 1)"
+          AAPT="$(find "$SDK_ROOT/build-tools" -type f -name aapt -print | sort -V | tail -n 1)"
+          ZIPALIGN="$(find "$SDK_ROOT/build-tools" -type f -name zipalign -print | sort -V | tail -n 1)"
+          test -x "$APKSIGNER"
+          test -x "$AAPT"
+          test -x "$ZIPALIGN"
+
+          "$APKSIGNER" verify --verbose --print-certs "$SOURCE_APK" | tee apksigner-report.txt
+          CERT_SHA256="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' apksigner-report.txt | head -n 1 | tr -d ':[:space:]' | tr 'A-F' 'a-f')"
+          test "$CERT_SHA256" = "$PREVIEW_CERT_SHA256"
+
+          "$AAPT" dump badging "$SOURCE_APK" | tee aapt-badging.txt
+          grep -Fq "package: name='${PREVIEW_PACKAGE_ID}'" aapt-badging.txt
+          grep -Fq "native-code: 'arm64-v8a'" aapt-badging.txt
+          if grep -Fq "native-code: 'armeabi-v7a'" aapt-badging.txt; then
+            echo "Unexpected ARMv7 payload in ARM64 install-repair APK" >&2
+            exit 1
+          fi
+
+          "$AAPT" dump permissions "$SOURCE_APK" | tee aapt-permissions.txt
+          if grep -Fq "name='android.permission.'" aapt-permissions.txt; then
+            echo "Malformed blank Android permission is still present" >&2
+            exit 1
+          fi
+
+          "$ZIPALIGN" -c -P 16 -v 4 "$SOURCE_APK" >/dev/null
+
+          echo "source_apk=$SOURCE_APK" >> "$GITHUB_OUTPUT"
+          echo "certificate_sha256=$CERT_SHA256" >> "$GITHUB_OUTPUT"
       - name: Prepare versioned release assets
         id: release_assets
         shell: bash
@@ -68,10 +124,10 @@ jobs:
           VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*//p' buildozer.spec | head -n 1 | tr -d '[:space:]')"
           test -n "$VERSION"
           TAG="v${VERSION}"
-          SOURCE_APK="$(find bin -maxdepth 1 -type f -name '*.apk' -print -quit)"
-          test -n "$SOURCE_APK"
+          SOURCE_APK="${{ steps.verify_apk.outputs.source_apk }}"
+          test -f "$SOURCE_APK"
 
-          RELEASE_APK="bin/PyBlocks-Studio-${TAG}-debug.apk"
+          RELEASE_APK="bin/PyBlocks-Studio-${TAG}-arm64-preview.apk"
           cp "$SOURCE_APK" "$RELEASE_APK"
           (
             cd "$(dirname "$RELEASE_APK")"
@@ -80,13 +136,15 @@ jobs:
 
           {
             printf '## PyBlocks Studio %s\n\n' "$TAG"
-            printf '%s\n\n' 'Initial Android package of the native Kivy visual Python programming environment.'
-            printf '%s\n' '- Package: org.jerrecode.pyblocksstudio'
+            printf '%s\n\n' 'Android installation-repair preview of the native Kivy visual Python programming environment.'
+            printf '%s\n' '- Package: org.jerrecode.pyblocksstudiopreview'
             printf '%s\n' '- Minimum Android version: API 24 / Android 7.0'
-            printf '%s\n' '- Architectures: ARM64 and ARMv7'
-            printf '%s\n' '- Build type: debug APK'
+            printf '%s\n' '- Architecture: ARM64'
+            printf '%s\n' '- Build type: debug-signed preview APK'
+            printf '%s\n' '- Stable preview certificate SHA-256: f380b4fd74574daa3a4f45abb5872fb6d48be95bf7aacdcfa867a41e0478f89b'
             printf '%s\n\n' "- Source commit: ${GITHUB_SHA}"
-            printf '%s\n' 'This prerelease APK is suitable for direct testing and sideloading. Android may ask you to permit installation from the browser or file-manager app used to open it. It is not a production-signed Google Play package.'
+            printf '%s\n' 'This build removes the malformed blank permission from v0.1.0 and uses a conflict-free package ID so it can be installed independently of any earlier PyBlocks Studio package.'
+            printf '%s\n' 'This is a public test-key prerelease for direct sideloading, not a production-signed Google Play package.'
           } > release-notes.md
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -109,14 +167,14 @@ jobs:
               --clobber
             gh release edit "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "PyBlocks Studio ${TAG}" \
+              --title "PyBlocks Studio ${TAG} Android install repair" \
               --notes-file release-notes.md \
               --prerelease
           else
             gh release create "$TAG" "$APK" "$CHECKSUM" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
-              --title "PyBlocks Studio ${TAG}" \
+              --title "PyBlocks Studio ${TAG} Android install repair" \
               --notes-file release-notes.md \
               --prerelease
           fi
@@ -124,10 +182,10 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: pyblocks-studio-debug-apk
+          name: pyblocks-studio-v0.1.1-arm64-preview-apk
           path: |
-            kivy_android/bin/PyBlocks-Studio-v*-debug.apk
-            kivy_android/bin/PyBlocks-Studio-v*-debug.apk.sha256
+            kivy_android/bin/PyBlocks-Studio-v*-arm64-preview.apk
+            kivy_android/bin/PyBlocks-Studio-v*-arm64-preview.apk.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -181,7 +239,7 @@ jobs:
               "recorded_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
               "workflow_url": f"https://github.com/{repo}/actions/runs/{os.environ['RUN_ID']}",
               "release_url": f"https://github.com/{repo}/releases/tag/{tag}",
-              "apk_url": f"https://github.com/{repo}/releases/download/{tag}/PyBlocks-Studio-{tag}-debug.apk",
+              "apk_url": f"https://github.com/{repo}/releases/download/{tag}/PyBlocks-Studio-{tag}-arm64-preview.apk",
           }
           Path(f"release-status/{tag}.json").write_text(
               json.dumps(data, indent=2, sort_keys=True) + "\n",
